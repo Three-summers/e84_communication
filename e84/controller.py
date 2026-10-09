@@ -388,9 +388,23 @@ class PiOController:
             known = ", ".join(self._port_by_id)
             raise KeyError(f"[{self.cfg.id}] 未知载口 {port_id!r}（已知: {known}）") from exc
 
-    def set_access_mode(self, port_id: str, mode: Optional[AccessMode]) -> None:
-        """设置载口访问模式（``None`` 恢复配置来源）。手动模式会按策略拉低 ``HO_AVBL``。"""
+    def set_access_mode(
+        self, port_id: str, mode: Optional[AccessMode], *, strict: bool = False
+    ) -> None:
+        """设置载口访问模式（``None`` 恢复配置来源）。手动模式会按策略拉低 ``HO_AVBL``。
 
+        :param strict: 为 ``True`` 时，若该接口正处于载具交接之中（SEMI E87 §11.1.2：
+            访问模式不得在 carrier transfer 期间切换），抛 :class:`ValueError` 而不是
+            照改。默认 ``False``——因为"操作员切手动"往往正是要**立即**中止交接的安全
+            动作，不能被守卫挡住；需要 E87 一致性的上位机可以显式打开。
+        """
+
+        if strict and self.fsm.transfer_in_progress:
+            raise ValueError(
+                f"[{self.cfg.id}] 载具交接进行中（state={self.fsm.state.value}），"
+                "按 SEMI E87 §11.1.2 不得切换访问模式；"
+                "若这是操作员的安全动作，请用 strict=False 直接切换。"
+            )
         self.load_port(port_id).set_access_mode(mode)
 
     def set_port_available(self, port_id: str, available: Optional[bool]) -> None:
@@ -488,6 +502,18 @@ class PiOController:
     @property
     def fault(self) -> Optional[Fault]:
         return self.fsm.fault
+
+    @property
+    def transfer_in_progress(self) -> bool:
+        """是否正处于一次载具交接之中（SEMI E87 Table 8 的 AUTO 交接区间）。"""
+
+        return self.fsm.transfer_in_progress
+
+    @property
+    def handshake_active(self) -> bool:
+        """握手是否已打开且尚未闭合。"""
+
+        return self.fsm.handshake_active
 
     @property
     def interlock_engaged(self) -> bool:

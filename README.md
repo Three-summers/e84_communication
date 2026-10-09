@@ -364,6 +364,12 @@ load_ports:
   `EventType.INTERLOCK_ENGAGED`，`BUSY`↓ 立刻发 `INTERLOCK_RELEASED`
   （**不会**拖到握手闭合，也不会因为对方卡在后续步骤而让机构一直冻着）；
   `BUSY=ON` 期间即使发生故障也保持冻结（对方机构可能还在干涉区里）。上层据此冻结/释放机构。
+- **访问模式与交接中的约束（SEMI E87）**：`Equipment.transfer_in_progress` /
+  `PiOController.transfer_in_progress` 按 E87 Table 8 给出"是否正在交接"；
+  交接期间调用 `set_access_mode(..., strict=True)` 会被拒绝（E87 §11.1.2 不允许在
+  carrier transfer 期间切换访问模式）。默认 `strict=False`，因为"操作员切手动"往往
+  正是要**立即**中止交接的安全动作。手动模式下 AMHS 硬来时本库绝不断言请求线，
+  并发 `HO_ABORTED` 事件供上层告警（E87 §11.3.3.2）。
 - **看门狗只在轮询推进时翻转**：`WatchdogConfig.channel` 的翻转由 `Equipment.poll()` 驱动，
   一旦调用方的轮询停止（进程卡死、线程崩溃），WDI 停摆，外部看门狗可把电路拉回安全态。
 - **`boot_safe_hold_ms`** 让上电后先保持安全态一段时间，等外部电路稳定。

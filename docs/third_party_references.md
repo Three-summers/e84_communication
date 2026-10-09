@@ -61,7 +61,10 @@ E84 是一条**硬线 24 V / 光耦的并行 I/O 握手**，它的落点是：
 |---|---|---|
 | **SEMI E84-0301 原文 PDF** | 逐条核对实现，取代此前的二手译文 | **抓出 B12（引脚表错误）**；确认连续交接中 `VALID` 会落下再抬起（`TP6`/`TD1` 的定义只在"每段是完整单次交接"下成立）；确认 Table 1/5/6/7 的定时器取值范围与典型值全部正确；确认单次交接 13 步与注 3/4/5 的实现逐条吻合 |
 | **GCI E84 Emulator Application Users Manual 2.4a** | 提取第三方符合性判据 | **抓出 B13（中止时抢跑撤请求线）**；提取出 15 项被动模式功能测试的**完整步骤序**，落成 X5 的 Test E/F/G 测试 |
-| SEMI E23-1104 / E87-0301 / E15.1 / E57 / GB‑T 44375‑2024 | 旁证 | 本轮只做交叉阅读，未发现与实现冲突之处；E23 是 E84 的前身（并行 I/O 传输），E87 是载口访问模式的来源 |
+| **SEMI E23-1104** | 前身标准（Cassette Transfer Parallel I/O）；**引脚分配的独立第二证据** | **印证了 B12 的修正**：E23 的引脚表是 `1 CS1 L_REQ / 2 CS1 U_REQ / 3 CS1 READY`——**L_REQ 与 U_REQ 是两个独立引脚**。同时可看出 E84 相对 E23 的演进：E23 是 `CS_0~CS_2` 三位、每个载口一组 `L_REQ/U_REQ/READY`；E84 改为两位 `CS_0/CS_1` + 共用请求线，并新增 `HO_AVBL`/`ES`/`CONT`（E23 中不存在这三个信号，已核对为 0 命中） |
+| **SEMI E87-0301** | CMS：访问模式与载口可用性 | **发现可补的约束并已实现**：① 访问模式是**每个载口**各自拥有的状态模型（与本库 `LoadPort.access_mode` 一致）；② §11.1.2 规定访问模式"可在任何时候切换，**但载具交接期间除外**" → 新增 `transfer_in_progress` 属性（按 E87 Table 8 的 AUTO 交接边界 = READY 有效 → 交接完成）与 `set_access_mode(..., strict=True)` 守卫；③ §11.3.3.2 规定 MANUAL 下只允许人工交接、且**设备需具备"AMHS 硬来时告警"的能力** → 本库在手动模式下把 `HO_AVBL` 拉低、绝不断言请求线，并在 AMHS 硬来时发 `HO_ABORTED` 事件供上层告警 |
+| SEMI E15.1-0600 / SEMI E57-0299 | **纯机械**标准（载口几何 / 运动学联轴器） | 均无任何协议内容（按 `L_REQ`/`U_REQ`/`VALID`/`HO_AVBL` 检索为 0 命中）。E84 §6.5 引用 E15.1 只为规定接口传感器单元的**安装空间** |
+| **GB/T 44375—2024** | 国标《300 mm 半导体设备装载端口要求》 | 同样**不含协议内容**：§4.5 给出与地面搬运系统交互的**光电传感器安装空间尺寸**（`D7`≤450、`D7`…`H7`=250、`D8`≥30、`H8`≥50、`W8`≥100、`H9`≤12、`W9`≤22 mm，光轴须落在 `W9×H9` 内）。已摘录到 [bringup_guide.md](bringup_guide.md) §1.4 作为现场安装判据 |
 
 ### 从仿真器手册提取的「15 项被动模式功能测试」
 
@@ -78,6 +81,7 @@ E84 是一条**硬线 24 V / 光耦的并行 I/O 握手**，它的落点是：
 | G | Handoff Available **3**（`TR_REQ` ON 后拉低 `HO_AVBL`，即窗口 b） | 功能 | ✅ `test_emulator_test_g_abort_holds_demand_until_handshake_closes`（**该测试抓出 B13**） |
 | H/I | `TA1` / `TA2` 超时告警 | 主动侧行为 | ✅ 本库主动侧参考实现有 `TA1`/`TA2` 超时（`test_active_reference.py`） |
 | — | 紧急停止（`ES`）装载/卸载操作 | 主动侧行为 | ✅ 本库把 `ES` 作为输出按本机安全链驱动（`set_es_ok`），并有测试；主动侧对 `ES` 的响应在参考实现中 |
+| — | 访问模式切换 / 交接中禁止切换 / 手动模式下拒绝自动交接（**SEMI E87** §11.1.2、§11.3.3.2） | 功能 | ✅ 新增 3 项测试：`test_e87_transfer_in_progress_window`、`test_e87_access_mode_change_rejected_during_transfer_when_strict`、`test_e87_manual_mode_never_asserts_demand_on_amhs_attempt` |
 | J | WIPS Jeopardy Test 1–3 | 厂商/AMHS 专有 | ❌ 与本标准无关，属特定 AMHS 厂商的附加要求 |
 
 > 静态测试 A/B/C（连接器标签、插头位置、恢复流程文档）是**人工目视项**，

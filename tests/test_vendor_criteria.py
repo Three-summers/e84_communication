@@ -290,3 +290,101 @@ def test_emulator_test_e_window_a_abort_has_no_demand_to_hold(env):
     _tick(runner, clk, 3)
     assert controller.outputs().ho_avbl is True
     runner.stop(now=clk.now())
+
+
+# --------------------------------------------------------------------------- #
+# 判据 8（SEMI E87-0301 §11.1.2 + §11.3.3.2）
+#   "The access mode for a load port may be switched at anytime by the host or the
+#    operator, except when the Load Port Reservation State Model ... is in the
+#    RESERVED state or **during carrier transfer**."
+#   "MANUAL — ... only manual (non-AMHS) carrier transfers are allowed. The
+#    production equipment shall have the capability of generating an alarm if an
+#    automated (AMHS) delivery is attempted."
+#
+#   → 本库需要 (a) 能判断"是否正在交接"（transfer_in_progress），
+#          (b) 拒绝在交接期间切换访问模式的能力（strict=True），
+#          (c) 手动模式下 AMHS 硬来时能产生可告警的痕迹（不得断言请求线）。
+# --------------------------------------------------------------------------- #
+def test_e87_transfer_in_progress_window(env):
+    """E87 Table 8：AUTO 交接区间 = READY 有效 → 交接完成（COMPT）。"""
+
+    io, clk, eq, runner, controller, events = env
+    _tick(runner, clk, 2)
+    assert controller.transfer_in_progress is False
+
+    io.set_input("IN2", False)   # CS_0
+    io.set_input("IN1", False)   # VALID
+    _tick(runner, clk, 3)
+    assert controller.state is State.REQ_ON
+    assert controller.transfer_in_progress is False, "READY 还没抬，尚未进入交接区间"
+    assert controller.handshake_active is True, "但握手已经打开"
+
+    io.set_input("IN5", False)   # TR_REQ -> READY ON
+    _tick(runner, clk, 2)
+    assert controller.state is State.WAIT_BUSY
+    assert controller.transfer_in_progress is True, "READY 有效即进入交接区间"
+
+    io.set_input("IN6", False)   # BUSY
+    _tick(runner, clk, 2)
+    assert controller.transfer_in_progress is True
+
+    for key in ("LP1_K0", "LP1_K1", "LP1_K2"):
+        io.set_input(key, False)
+    _tick(runner, clk, 4)
+    assert controller.state is State.AWAIT_COMPT
+    assert controller.transfer_in_progress is True, "等 COMPT 期间仍属交接中"
+
+    io.set_input("IN6", True)
+    io.set_input("IN5", True)
+    io.set_input("IN7", False)   # COMPT
+    _tick(runner, clk, 2)
+    assert controller.transfer_in_progress is False, "COMPT 之后交接结束"
+    assert controller.handshake_active is True, "但握手还要等 VALID 落下才闭合"
+    runner.stop(now=clk.now())
+
+
+def test_e87_access_mode_change_rejected_during_transfer_when_strict(env):
+    """E87 §11.1.2：交接期间不得切换访问模式（strict=True 时应拒绝）。"""
+
+    io, clk, eq, runner, controller, events = env
+    io.set_input("IN2", False)
+    io.set_input("IN1", False)
+    _tick(runner, clk, 3)
+    io.set_input("IN5", False)
+    _tick(runner, clk, 2)
+    assert controller.transfer_in_progress is True
+
+    # strict=True -> 拒绝
+    with pytest.raises(ValueError, match="E87"):
+        controller.set_access_mode("LP1", AccessMode.MANUAL, strict=True)
+    # 被拒绝后访问模式没有被改掉
+    assert controller.port_snapshots(clk.now())[0].access_mode is AccessMode.AUTOMATIC
+
+    # strict=False（默认）-> 允许：因为"操作员切手动"往往正是要立即中止交接的安全动作
+    controller.set_access_mode("LP1", AccessMode.MANUAL)
+    _tick(runner, clk, 2)
+    assert controller.port_snapshots(clk.now())[0].access_mode is AccessMode.MANUAL
+    assert controller.state is State.HO_ABORT
+    assert controller.outputs().ho_avbl is False
+    runner.stop(now=clk.now())
+
+
+def test_e87_manual_mode_never_asserts_demand_on_amhs_attempt(env):
+    """E87 §11.3.3.2：手动模式下只允许人工交接；AMHS 硬来时不得配合。"""
+
+    io, clk, eq, runner, controller, events = env
+    _tick(runner, clk, 2)
+    controller.set_access_mode("LP1", AccessMode.MANUAL)
+    _tick(runner, clk, 2)
+    assert controller.outputs().ho_avbl is False, "手动模式必须宣告不可自动交接"
+
+    # AMHS 无视 HO_AVBL 强行握手
+    io.set_input("IN2", False)
+    io.set_input("IN1", False)
+    _tick(runner, clk, 3)
+    assert controller.outputs().demand_on is False, "手动模式下不得断言请求线"
+    assert controller.state is State.HO_ABORT
+    # 上层可据此告警（E87 要求"capability of generating an alarm"）
+    assert any(e.type is EventType.HO_ABORTED for e in events)
+    assert controller.fault is None
+    runner.stop(now=clk.now())

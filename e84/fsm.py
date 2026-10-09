@@ -1101,9 +1101,37 @@ class PassiveFsm:
             "outputs": self._last_outputs.as_dict(),
             "interlock_engaged": self.interlock_engaged,
             "abort_demand": self._abort_demand.value,
+            "transfer_in_progress": self.transfer_in_progress,
+            "handshake_active": self.handshake_active,
             "batch_active": self._batch_active,
             "segment_continuous": self._segment_cont,
         }
+
+    #: SEMI E87 §11.1.2 意义上的"载具交接进行中"。
+    #: E87 Table 8 把 AUTO 交接的边界定义为：「PIO 的 READY 信号有效」→「PIO 指示交接完成」。
+    _TRANSFER_STATES = (State.WAIT_BUSY, State.TRANSFER, State.AWAIT_COMPT)
+    #: 从选口到握手闭合的整个区间（期间不宜改变访问模式/可用性等配置）。
+    _HANDSHAKE_STATES = (
+        State.SELECT, State.REQ_ON, State.WAIT_BUSY, State.TRANSFER,
+        State.AWAIT_COMPT, State.CLOSING, State.CONT_NEXT,
+    )
+
+    @property
+    def transfer_in_progress(self) -> bool:
+        """是否正处于一次载具交接之中（SEMI E87 Table 8 的 AUTO 交接区间）。
+
+        E87 §11.1.2：访问模式"may be switched at anytime ... **except** when the Load
+        Port Reservation State Model ... is in the RESERVED state or **during carrier
+        transfer**"。上层应在改动访问模式/载口可用性之前先看这个属性。
+        """
+
+        return self.state in self._TRANSFER_STATES
+
+    @property
+    def handshake_active(self) -> bool:
+        """握手是否已经打开且尚未闭合（比 :attr:`transfer_in_progress` 更宽）。"""
+
+        return self.state in self._HANDSHAKE_STATES
 
     @property
     def batch_active(self) -> bool:

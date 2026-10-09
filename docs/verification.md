@@ -120,6 +120,9 @@ python3 -m e84.cli sim configs/example_2lp_standard.yaml --job load:left --job l
 | E23 | 「纯 FSM 直驱」与「完整栈」并排跑 3000 拍随机波形 | 状态、逻辑输出、物理电平三者逐拍一致 | ✅（交叉验证 X1） |
 | E24 | 只给 `CS_0` 不给 `VALID` | 被动必须保持 `IDLE`（规范注 3） | ✅（交叉验证 X3） |
 | E25 | `BUSY` 落下但握手尚未闭合（或握手已中止） | 干涉区冻结**必须立刻**跟随 `BUSY` 解除 | ✅（见 §4 B11） |
+| E26 | 交接进行中调用 `set_access_mode(..., strict=True)` | 必须拒绝，且不得改掉访问模式（SEMI E87 §11.1.2） | ✅ |
+| E27 | `transfer_in_progress` 的区间 | 必须等于 E87 Table 8 的 AUTO 交接边界：READY 有效 → 交接完成 | ✅ |
+| E28 | 手动访问模式下 AMHS 强行交接 | 不得断言请求线；必须留下可告警的事件（E87 §11.3.3.2） | ✅ |
 
 ### 故障态输出画像（相关信息 1 R1-1.1.2.1）
 

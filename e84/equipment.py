@@ -188,9 +188,14 @@ class Equipment:
         return self.controller(interface_id).load_port(port_id)
 
     def set_access_mode(
-        self, interface_id: str, port_id: str, mode: Optional[AccessMode]
+        self,
+        interface_id: str,
+        port_id: str,
+        mode: Optional[AccessMode],
+        *,
+        strict: bool = False,
     ) -> None:
-        self.controller(interface_id).set_access_mode(port_id, mode)
+        self.controller(interface_id).set_access_mode(port_id, mode, strict=strict)
 
     def set_operation_intent(
         self, interface_id: str, port_id: str, op: Optional[Op]
@@ -234,6 +239,18 @@ class Equipment:
         """是否有任一接口正处于 ``BUSY=ON``（干涉区冻结）状态。"""
 
         return any(c.interlock_engaged for c in self.controllers)
+
+    @property
+    def transfer_in_progress(self) -> bool:
+        """是否有任一接口正处于载具交接之中（SEMI E87 Table 8）。"""
+
+        return any(c.transfer_in_progress for c in self.controllers)
+
+    @property
+    def handshake_active(self) -> bool:
+        """是否有任一接口的握手尚未闭合。"""
+
+        return any(c.handshake_active for c in self.controllers)
 
     @property
     def states(self) -> Mapping[str, State]:
