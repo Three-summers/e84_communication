@@ -1,0 +1,125 @@
+# =============================================================================
+# 示例配置：把**现场既有板卡**的接线事实搬进新库
+#
+# 这份配置来源于旧的 VOC 实现（树莓派 + RPi.GPIO，BCM 编号），但它**不是**在
+# 复刻旧代码的时序逻辑——旧逻辑不符合标准（缺 CS_1、缺 CONT、无 HO_AVBL 时序窗、
+# 无同时/连续交接、超时不锁存）。这里只保留「现场事实」：
+#
+#   * 只有 1 个载口、没有 CS_1          -> topology: one_load_port
+#   * 有一条板级联锁信号 GO             -> preconditions: [VALID, CS_0, GO]
+#   * 输出低有效（SIG_ON = False）      -> active_high: false
+#   * E84 输入内部上拉、读取取反        -> pull: up + active_high: false
+#   * 用 3 个落位键区分「有料」与「坐稳」-> carrier_present / carrier_in_position
+#   * 2s / 60s 两档时限                 -> TP1..TP6 展开配置
+#
+# ★ 有意**不**复刻的旧行为（这些是旧实现里值得改掉的地方，见
+#   docs/design/e84_python_library_design.md §16）：
+#
+#   1) 旧代码用三键状态**直接推导** HO_AVBL 与 ES（三键全落=ON，部分落=OFF，无键=ON）。
+#      这既不是 HO_AVBL 的标准语义（它表示"交接不可用"，还与访问模式/载口可用性有关），
+#      也让 ES 完全脱离真实安全链。本配置改为：HO_AVBL 由载口可用性/访问模式合成，
+#      ES 由本机安全链（`set_es_ok()`）决定。若现场确实需要"部分落位即宣告不可交接"，
+#      正确做法是把那个条件接到载口的 available / ready_for_transfer，而不是写死进协议栈。
+#   2) 旧代码把 GO/CS_0/VALID 当作**恒等**的握手前提，任一撤销就撤输出回 IDLE。
+#      本配置把 GO 放进 preconditions 以保留现场联锁，但协议栈仍按标准在
+#      VALID 上升沿选口、按 TPx 判超时（旧代码没有独立定时器）。
+#   3) 旧代码上电默认"载具在位"，于是第一次握手会被判成 Unload。
+#      本配置不给任何隐式默认值：有料/无料完全由键状态决定。
+#
+# ⚠️ 现场必须复核：旧代码对三键用 `PUD_DOWN` 却又统一取反（低电平=按键有效），
+#    这两者语义相反。本配置统一按"对地闭合 + 上拉 + 低有效"表达。上机前请用
+#    `python3 -m e84.cli monitor <本文件> --dry-run` 之外的方式实测一次键极性。
+# =============================================================================
+schema_version: 1
+name: "VOC-COMPAT-LOADPORT"
+backend: rpi                 # 现场是树莓派；非树莓派环境请改成 memory/sim/libgpiod
+poll_interval_ms: 5          # 旧实现是 200ms，太慢（TD0 只有 100ms），这里收紧
+boot_safe_hold_ms: 500       # 上电先保持安全态，等外部电路稳定
+log_level: INFO
+trace:
+  enabled: true
+  path: e84_trace.csv
+  format: csv
+  flush_every: 1
+
+interfaces:
+  - id: PIO1
+    scenario: standard
+    topology: one_load_port      # 现场只有 1 个载口；表3 要求 CS_0 恒 ON、CS_1 恒 OFF
+    features:
+      simultaneous: false        # 单载口谈不上同时交接
+      continuous: false          # 现场未使用连续交接；需要时打开并绑定 CONT
+    # 现场联锁：旧板的 GO 必须与 VALID/CS_0 同时成立才允许握手。
+    # 这是**现场事实**，不是标准要求；不同机型删掉 GO 即可回到纯标准行为。
+    preconditions: [VALID, CS_0, GO]
+
+    io_defaults:
+      active_high: false         # 低有效：ON = 引脚低
+      pull: up                   # E84 输入内部上拉
+      debounce_ms: 3             # 旧实现对 E84 输入零滤波，这里给一点最小脉宽保护
+      safe_on: false             # 安全态 = OFF（§6.4.6：OFF = 无电流/无光）
+
+    load_ports:
+      - id: LP1
+        role: single
+        # 任意一键闭合 = 检测到载具（旧 FOUP_status）
+        carrier_present:
+          source: keys
+          channels: [K0, K1, K2]
+          mode: any
+        # 三键全落 = 载具位于正确位置（旧 FOUP_docked）
+        # §6.1 表1：以"位于正确位置"判定 L_REQ/U_REQ 落下；否则载具没坐稳就撤请求线会掉片
+        carrier_in_position:
+          source: keys
+          channels: [K0, K1, K2]
+          mode: all
+          debounce_ms: 200           # 旧实现对三键做 200ms 非阻塞消抖，保留这个现场经验值
+        ready_for_transfer: {source: constant, value: true}
+        door_open: {source: constant, value: true}       # 现场无门机构
+        clamp_released: {source: constant, value: true}  # 夹持由执行机构串口控制，不在此 PI/O
+        access_mode: {source: api}     # 由上层（GUI/主控）调用 set_access_mode() 注入
+        operation_intent: {source: derived}
+        # 可选：把"机构未就绪"接进来（例如上料机器人忙），未接线时保持 constant
+        # ready_for_transfer: {source: input, channel: LP1_RDY}
+
+    outputs:
+      # 现场 L_REQ 与 U_REQ 是**两个独立引脚**（BCM 2 / 3）——这与表 9 原文一致
+      # （L_REQ=引脚1、U_REQ=引脚2）。网上流传的中文译文把它们错排成共用引脚 1，
+      # 本配置走的是正确的独立接线。
+      L_REQ:   {channel: "2"}
+      U_REQ:   {channel: "3"}
+      READY:   {channel: "4"}
+      HO_AVBL: {channel: "17"}
+      ES:      {channel: "27", safe_on: false}
+
+    inputs:
+      VALID:  {channel: "10"}
+      CS_0:   {channel: "9"}
+      TR_REQ: {channel: "5"}
+      BUSY:   {channel: "6"}
+      COMPT:  {channel: "13"}
+      # 板级现场信号：必须绑定，否则 preconditions 里的 GO 恒为 OFF
+      GO:     {channel: "22"}
+
+    timers:
+      TP1: 2     # 旧 ShortTimer
+      TP2: 2     # 旧 ShortTimer
+      TP3: 60    # 旧 LongTimer（BUSY -> 载具到位/取走）
+      TP4: 60    # 旧 LongTimer（请求线 OFF -> BUSY OFF）
+      TP5: 2     # 旧 ShortTimer
+      TP6: 2     # 单载口且未启用连续交接，留作默认值
+
+    policy:
+      # 现场如果确实要保留旧的"联锁撤销就撤输出回 IDLE"直觉：
+      #   abort_on_precondition_loss: true   （默认就是 true）
+      # 注意本库的语义是：VALID 仍在时拉低 HO_AVBL 等对方闭合，VALID 已落下才回 IDLE，
+      # 比旧代码"无条件回 IDLE"更能让主动设备按标准方式退让。
+      abort_on_precondition_loss: true
+      invalid_cs: fault
+      on_timeout: fault           # 旧实现只发 warning 不锁存；这里改为锁存，需显式 clear_fault()
+      request_hold_on_fault: true # 相关信息1 R1-1.1.2.1：出错时其余信号保持
+      es_latched_on_fault: true
+      ho_avbl_when_manual: false  # 手动访问模式时拉低 HO_AVBL
+      ho_avbl_scope: all_ports
+      not_ready_timeout_s: 1.5
+      single_lp_require_cs1_off: false   # 现场根本没有接 CS_1

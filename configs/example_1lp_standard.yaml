@@ -1,0 +1,133 @@
+# =============================================================================
+# 示例配置：单个载口独占一个 PI/O（标准场景，装备 = 被动端）
+#
+# 对应 SEMI E84-0301 §6.1.2.1 / 图 4、图 5 / **表 3**：
+#   一个 PI/O 只对应 1 个载口时：
+#       CS_0 恒为 ON   —— 指代该唯一载口
+#       CS_1 恒为 OFF  —— 不使用（标准明确要求）
+#   因此本配置里 CS_1 仍然绑定到一根输入线（用于**校验**对方有没有违规把它拉 ON），
+#   但任何时刻都不得为 ON。本库在 topology=one_load_port 下若读到 CS_1=ON，
+#   会按 policy.single_lp_require_cs1_off 判为 INVALID_CS_COMBINATION 故障。
+#
+# 与 example_2lp_standard.yaml 的差异：
+#   * topology: one_load_port（而不是 two_load_ports）；
+#   * 只有一个载口，role: single（§6.1.2.1：单载口接口没有左右之分）；
+#   * features.simultaneous: false（同时交接要求两个载口共用 PI/O，§6.1.2.4）；
+#   * output/input 通道号只用了单载口一组，引脚对应表 9 的 OUT1..OUT8 / IN1..IN8。
+#
+# 电气约定（与常见光耦/硬线现场一致）：
+#   * 输出低有效：逻辑 ON  -> 引脚低电平
+#   * 输入低有效 + 上拉：开路为 OFF，被拉低为 ON
+# 这些都逐信号可改；把 io_defaults.active_high 改成 true 即整体反相。
+# =============================================================================
+schema_version: 1
+name: "EXAMPLE-LP-SINGLE-01"
+backend: sim                # 现场改成 libgpiod；调试期可用 --dry-run 强制 null
+poll_interval_ms: 5         # 必须远小于 TD0(100ms)，否则互锁精度会明显下降
+boot_safe_hold_ms: 0        # 上电先保持安全态（ES=OFF、HO_AVBL=OFF）的时长
+log_level: INFO
+log_json: false
+trace:
+  enabled: false            # 需要现场留痕时改 true，或命令行 --trace-out
+  path: e84_trace.csv
+  format: csv
+
+interfaces:
+  - id: PIO1
+    scenario: standard
+    # 一个 PI/O 对应一个载口 —— 见规范表 3
+    topology: one_load_port
+    features:
+      simultaneous: false   # 单载口拓扑不支持同时交接（§6.1.2.4）
+      continuous: true      # §6.2.4：支持连续交接（同一载口卸→装等多段）
+    # 握手前置条件。标准只要求 VALID；现场若另有板级联锁（如旧板的 GO），
+    # 只需在此追加信号名并在 inputs 里绑定，再在运行时用 set_extra_input() 注入。
+    preconditions: [VALID]
+
+    # 接口级 I/O 默认值，避免逐信号重复书写
+    io_defaults:
+      active_high: false
+      pull: up
+      debounce_ms: 2
+      safe_on: false
+
+    load_ports:
+      - id: LP1
+        # 单载口接口没有左右手之分（§6.1.2.1 / 表 3）
+        role: single
+        # 「检测到载具」（任意一键）→ 用于判断能否卸载
+        carrier_present:
+          source: keys
+          channels: [LP1_K0, LP1_K1, LP1_K2]
+          mode: any
+          pull: up
+        # 「载具位于正确位置」（三键全落）→ §6.1 表 1 判定 L_REQ/U_REQ 落下的依据
+        # 注意：标准要求以「正确位置」而非「检测到载具」来撤请求线，
+        # 否则载具尚未落稳就可能收线，现场有掉片/压伤风险。
+        carrier_in_position:
+          source: keys
+          channels: [LP1_K0, LP1_K1, LP1_K2]
+          mode: all
+          pull: up
+          debounce_ms: 20
+        ready_for_transfer: {source: constant, value: true}
+        door_open: {source: constant, value: true}
+        clamp_released: {source: constant, value: true}
+        # 访问模式：static=固定自动；也可写成 {source: input, channel: AM_SW}（§5.1/§5.14）
+        access_mode: {source: static, value: automatic}
+        # 交接方向：derived=由载具传感器推导（空位→装载；完整落位→卸载）
+        operation_intent: {source: derived}
+
+    # ---- 被动侧输出（P -> A，本库驱动）----
+    outputs:
+      # §6.1 表 1：L_REQ/U_REQ 以「载具流向」定义（load = 主动→被动）。
+      # 表 9 原文里两者是**各自独立**的引脚 1 与引脚 2。
+      L_REQ:   {channel: OUT1}    # 表 9 引脚 1
+      U_REQ:   {channel: OUT2}    # 表 9 引脚 2
+      # 现场若把两根请求线并在一条线上，把上面两行写成同一个 channel 即可。
+      # 表 9 引脚 4：READY（跨区场景的 VS_0 是**另一个**引脚 5，见 README §6）
+      READY:   {channel: OUT4}
+      # 表 9 引脚 7：可交接
+      HO_AVBL: {channel: OUT7}
+      # 表 9 引脚 8：紧急停止请求，低有效；安全态必须为 OFF（§6.4.6）
+      ES:      {channel: OUT8, safe_on: false}
+
+    # ---- 主动侧输入（A -> P，本库读取）----
+    inputs:
+      # 表 9 引脚 14：接口通信有效（VALID 上升沿才开始一次新握手）
+      VALID:   {channel: IN1}
+      # 表 9 引脚 15：单载口时恒为 ON
+      CS_0:    {channel: IN2}
+      # 表 9 引脚 16：单载口时恒为 OFF（表 3）；绑上它是为了让本库能校验对方违规
+      CS_1:    {channel: IN3}
+      # 表 9 引脚 18/19/20/21
+      TR_REQ:  {channel: IN5}
+      BUSY:    {channel: IN6}
+      COMPT:   {channel: IN7}
+      CONT:    {channel: IN8}
+
+    # ---- 定时器（§6.3.2.1 表 6，范围 1–999s，全部可由用户编程）----
+    timers:
+      TP1: 2      # L_REQ/U_REQ ON  -> TR_REQ ON
+      TP2: 2      # READY ON         -> BUSY ON
+      TP3: 60     # BUSY ON          -> 载具到位 / 载具被取走（典型 60s）
+      TP4: 60     # 请求线 OFF       -> BUSY OFF（典型 60s）
+      TP5: 2      # READY OFF        -> VALID OFF
+      TP6: 2      # VALID OFF        -> VALID ON（连续交接）
+      TD1: 1      # 监视用：连续交接两段之间的 VALID 间隔
+
+    policy:
+      invalid_cs: fault                      # CS 组合非法 -> 故障
+      intent_mismatch: fault                 # 上层意图与传感器矛盾 -> 故障
+      unsupported_simultaneous: fault
+      tp6_timeout: idle                      # 连续交接中场等超时 -> 回 idle
+      on_timeout: fault
+      request_hold_on_fault: true            # 相关信息 1：请求线保持出错时刻状态
+      es_latched_on_fault: true              # 故障锁存期间持续拉低 ES
+      ho_avbl_when_manual: false             # 手动访问模式下是否也拉低 HO_AVBL
+      ho_avbl_scope: all_ports
+      not_ready_timeout_s: 1.5               # 必须小于对方 TA1 典型值 2s
+      cont_sample_delay_ms: 10               # BUSY 上升沿后延迟采样 CONT
+      busy_before_req_off: fault
+      compt_before_busy_off: fault
+      single_lp_require_cs1_off: true        # 表 3：单载口时 CS_1 必须恒为 OFF

@@ -1,0 +1,128 @@
+# =============================================================================
+# 示例配置：两个载口共用一个 PI/O（标准场景，装备 = 被动端）
+#
+# 对应 SEMI E84-0301 §6.1.2.4 / 图 8 / 表 2：CS_0 选左载口，CS_1 选右载口，
+# 两者同时 ON 表示同时交接。
+#
+# 引脚号按 SEMI E84-0301 表 9 **原文**：
+#   L_REQ=1  U_REQ=2  VA=3  READY=4  VS_0=5  VS_1=6  HO_AVBL=7  ES=8
+#   VALID=14 CS_0=15  CS_1=16 AM_AVBL=17 TR_REQ=18 BUSY=19 COMPT=20 CONT=21
+#
+# 电气约定（与常见光耦/硬线现场一致）：
+#   * 输出低有效：逻辑 ON  -> 引脚低电平
+#   * 输入低有效 + 上拉：开路为 OFF，被拉低为 ON
+# 这些都可以逐信号修改；把 active_high 改成 true 即反相。
+# =============================================================================
+schema_version: 1
+name: "EXAMPLE-ETCHER-01"
+backend: sim                # 生产上改成 libgpiod
+poll_interval_ms: 5         # 需远小于 TD0(100ms) 才能保证互锁精度
+boot_safe_hold_ms: 0
+log_level: INFO
+log_json: false
+trace:
+  enabled: false
+  path: e84_trace.csv
+  format: csv
+
+interfaces:
+  - id: PIO1
+    scenario: standard
+    topology: two_load_ports
+    features:
+      simultaneous: true    # §6.2.3：同时交接
+      continuous: true      # §6.2.4：连续交接
+    # 握手前置条件。标准只要求 VALID；现场若另有板级联锁（如旧板的 GO），
+    # 只需在此追加信号名并在 inputs 里绑定它。
+    preconditions: [VALID]
+
+    # 接口级 I/O 默认值，避免逐信号重复书写
+    io_defaults:
+      active_high: false
+      pull: up
+      debounce_ms: 2
+      safe_on: false
+
+    load_ports:
+      - id: LP1
+        role: left
+        # 「检测到载具」（任意一键）→ 用于判断能否卸载
+        carrier_present:
+          source: keys
+          channels: [LP1_K0, LP1_K1, LP1_K2]
+          mode: any
+          pull: up
+        # 「载具位于正确位置」（三键全落）→ §6.1 表1 判定 L_REQ/U_REQ 落下的依据
+        carrier_in_position:
+          source: keys
+          channels: [LP1_K0, LP1_K1, LP1_K2]
+          mode: all
+          pull: up
+          debounce_ms: 20
+        ready_for_transfer: {source: constant, value: true}
+        door_open: {source: constant, value: true}
+        clamp_released: {source: constant, value: true}
+        access_mode: {source: static, value: automatic}
+        operation_intent: {source: derived}
+
+      - id: LP2
+        role: right
+        carrier_present:
+          source: keys
+          channels: [LP2_K0, LP2_K1, LP2_K2]
+          mode: any
+          pull: up
+        carrier_in_position:
+          source: keys
+          channels: [LP2_K0, LP2_K1, LP2_K2]
+          mode: all
+          pull: up
+          debounce_ms: 20
+        access_mode: {source: static, value: automatic}
+        operation_intent: {source: derived}
+
+    # ---- 被动侧输出（P -> A）----
+    # 通道名按表 9 原文的引脚号组织：OUT1=L_REQ(引脚1)、OUT2=U_REQ(引脚2)…
+    outputs:
+      L_REQ:   {channel: OUT1}    # 表 9 引脚 1
+      U_REQ:   {channel: OUT2}    # 表 9 引脚 2
+      # 若现场把两根请求线并在一条线上，就把上面两行写成同一个 channel
+      # （例如都是 OUT1）：HAL 会保证两者互斥，校验器只报告警，不会拒绝启动。
+      READY:   {channel: OUT4}
+      HO_AVBL: {channel: OUT7}
+      ES:      {channel: OUT8, safe_on: false}
+
+    # ---- 主动侧输入（A -> P）----
+    inputs:
+      VALID:   {channel: IN1}
+      CS_0:    {channel: IN2}
+      CS_1:    {channel: IN3}
+      TR_REQ:  {channel: IN5}
+      BUSY:    {channel: IN6}
+      COMPT:   {channel: IN7}
+      CONT:    {channel: IN8}
+
+    # ---- 定时器（§6.3.2.1 表6，全部可由用户编程；范围 1–999s）----
+    timers:
+      TP1: 2      # L_REQ/U_REQ ON  -> TR_REQ ON
+      TP2: 2      # READY ON         -> BUSY ON
+      TP3: 60     # BUSY ON          -> 载具到位 / 被取走
+      TP4: 60     # 请求线 OFF       -> BUSY OFF
+      TP5: 2      # READY OFF        -> VALID OFF
+      TP6: 2      # VALID OFF        -> VALID ON（连续交接）
+      TD1: 1      # 监视用：实际段间隔
+
+    policy:
+      invalid_cs: fault
+      intent_mismatch: fault
+      tp6_timeout: idle
+      on_timeout: fault
+      request_hold_on_fault: true
+      es_latched_on_fault: true
+      ho_avbl_when_manual: false
+      ho_avbl_scope: all_ports
+      not_ready_timeout_s: 1.5
+      cont_sample_delay_ms: 10
+      busy_before_req_off: fault
+      compt_before_busy_off: fault
+      single_lp_require_cs1_off: true
